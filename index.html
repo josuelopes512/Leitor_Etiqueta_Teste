@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Leitor de Tombamento (OCR no celular)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    video, canvas { width: 100%; max-width: 520px; border-radius: 12px; background: #111; }
+    .panel { max-width: 520px; }
+    .overlayWrap { position: relative; width: 100%; max-width: 520px; }
+    #video { display:block; }
+    .overlay {
+      position: absolute; inset: 0;
+      pointer-events: none;
+    }
+    /* Janela de recorte central */
+    .crop {
+      position: absolute;
+      left: 50%; top: 50%;
+      transform: translate(-50%, -50%);
+      width: 70%;
+      height: 30%;
+      border: 2px solid rgba(0, 255, 140, 0.95);
+      border-radius: 10px;
+      box-shadow: 0 0 0 9999px rgba(0,0,0,0.35);
+    }
+    button { padding: 10px 14px; border: 0; border-radius: 10px; cursor: pointer; }
+    button.primary { background: #0a7; color: white; }
+    button.secondary { background: #eee; }
+    .muted { color: #666; font-size: 13px; }
+    .out { background: #f6f6f6; border-radius: 12px; padding: 12px; }
+    input[type="range"] { width: 220px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <h2>Leitor de etiqueta (OCR no celular — web)</h2>
+
+  <div class="panel">
+    <p class="muted">
+      Dica: evite reflexo. Incline o celular/etiqueta e use luz lateral para o relevo aparecer.
+    </p>
+
+    <div class="overlayWrap">
+      <video id="video" playsinline autoplay muted></video>
+      <div class="overlay">
+        <div id="cropBox" class="crop"></div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top: 12px;">
+      <button class="primary" id="btnStart">Abrir câmera</button>
+      <button class="secondary" id="btnSnap" disabled>Capturar + Ler</button>
+      <button class="secondary" id="btnStop" disabled>Parar</button>
+    </div>
+
+    <div class="row" style="margin-top: 10px;">
+      <label class="muted">Largura do recorte</label>
+      <input id="wRange" type="range" min="40" max="95" value="70" />
+      <span class="muted" id="wVal">70%</span>
+
+      <label class="muted" style="margin-left:8px;">Altura</label>
+      <input id="hRange" type="range" min="15" max="60" value="30" />
+      <span class="muted" id="hVal">30%</span>
+    </div>
+
+    <canvas id="canvas" style="display:none;"></canvas>
+    <canvas id="preview" style="margin-top: 12px;"></canvas>
+
+    <div class="out" style="margin-top: 12px;">
+      <div><strong>Número (apenas dígitos):</strong></div>
+      <div class="mono" id="digits" style="font-size: 20px; margin: 6px 0;">—</div>
+      <div class="muted" id="conf">Confiança: —</div>
+      <div style="margin-top: 10px;"><strong>Texto bruto (OCR):</strong></div>
+      <div class="mono" id="raw" style="white-space: pre-wrap; margin-top: 6px;">—</div>
+      <div class="row" style="margin-top: 10px;">
+        <button class="secondary" id="btnCopy" disabled>Copiar número</button>
+      </div>
+    </div>
+
+    <p class="muted" style="margin-top: 12px;">
+      Se o navegador bloquear a câmera: use HTTPS, permita a permissão e teste no Chrome/Android ou Safari/iOS.
+    </p>
+  </div>
+
+  <!-- Tesseract.js via CDN (para offline, você pode baixar e servir localmente) -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const preview = document.getElementById('preview');
+    const cropBox = document.getElementById('cropBox');
+
+    const btnStart = document.getElementById('btnStart');
+    const btnSnap  = document.getElementById('btnSnap');
+    const btnStop  = document.getElementById('btnStop');
+    const btnCopy  = document.getElementById('btnCopy');
+
+    const digitsEl = document.getElementById('digits');
+    const rawEl    = document.getElementById('raw');
+    const confEl   = document.getElementById('conf');
+
+    const wRange = document.getElementById('wRange');
+    const hRange = document.getElementById('hRange');
+    const wVal = document.getElementById('wVal');
+    const hVal = document.getElementById('hVal');
+
+    let stream = null;
+
+    function setCropBox() {
+      const w = wRange.value;
+      const h = hRange.value;
+      cropBox.style.width = w + '%';
+      cropBox.style.height = h + '%';
+      wVal.textContent = w + '%';
+      hVal.textContent = h + '%';
+    }
+    wRange.addEventListener('input', setCropBox);
+    hRange.addEventListener('input', setCropBox);
+    setCropBox();
+
+    btnStart.addEventListener('click', async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        });
+        video.srcObject = stream;
+        btnSnap.disabled = false;
+        btnStop.disabled = false;
+        btnStart.disabled = true;
+      } catch (e) {
+        alert('Não foi possível acessar a câmera: ' + e.message);
+      }
+    });
+
+    btnStop.addEventListener('click', () => {
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      video.srcObject = null;
+      btnSnap.disabled = true;
+      btnStop.disabled = true;
+      btnStart.disabled = false;
+    });
+
+    btnCopy.addEventListener('click', async () => {
+      const txt = digitsEl.textContent.trim();
+      if (!txt || txt === '—') return;
+      try {
+        await navigator.clipboard.writeText(txt);
+        btnCopy.textContent = 'Copiado!';
+        setTimeout(() => btnCopy.textContent = 'Copiar número', 1200);
+      } catch {
+        alert('Não consegui copiar. Selecione e copie manualmente.');
+      }
+    });
+
+    function preprocessToBW(imageData) {
+      // Grayscale + contraste simples + threshold
+      const d = imageData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const r = d[i], g = d[i+1], b = d[i+2];
+        // luminância
+        let y = (0.299*r + 0.587*g + 0.114*b);
+
+        // contraste (ajuste leve)
+        // valores maiores aumentam contraste; cuidado com estourar o branco
+        const contrast = 1.25;
+        y = (y - 128) * contrast + 128;
+
+        // threshold (binário)
+        const t = 155; // pode ajustar conforme a etiqueta/reflexo
+        const v = (y > t) ? 255 : 0;
+
+        d[i] = d[i+1] = d[i+2] = v;
+        d[i+3] = 255;
+      }
+      return imageData;
+    }
+
+    btnSnap.addEventListener('click', async () => {
+      if (!stream) return;
+
+      btnSnap.disabled = true;
+      btnStart.disabled = true;
+      digitsEl.textContent = 'Lendo...';
+      rawEl.textContent = 'Processando imagem...';
+      confEl.textContent = 'Confiança: —';
+      btnCopy.disabled = true;
+
+      try {
+        // Captura frame do vídeo para um canvas "full"
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+
+        if (!vw || !vh) throw new Error('Vídeo não está pronto ainda.');
+
+        canvas.width = vw;
+        canvas.height = vh;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(video, 0, 0, vw, vh);
+
+        // Calcula o recorte baseado no cropBox (em %)
+        const cropW = (parseFloat(wRange.value) / 100) * vw;
+        const cropH = (parseFloat(hRange.value) / 100) * vh;
+        const sx = (vw - cropW) / 2;
+        const sy = (vh - cropH) / 2;
+
+        // Cria imagem recortada e ampliada (ajuda OCR)
+        const scale = 2.0; // aumentar para facilitar leitura dos dígitos
+        const outW = Math.round(cropW * scale);
+        const outH = Math.round(cropH * scale);
+
+        preview.width = outW;
+        preview.height = outH;
+
+        const pctx = preview.getContext('2d', { willReadFrequently: true });
+        pctx.drawImage(canvas, sx, sy, cropW, cropH, 0, 0, outW, outH);
+
+        // Pré-processamento P&B
+        let imgData = pctx.getImageData(0, 0, outW, outH);
+        imgData = preprocessToBW(imgData);
+        pctx.putImageData(imgData, 0, 0);
+
+        rawEl.textContent = 'Rodando OCR... (pode levar alguns segundos)';
+
+        // OCR (whitelist só dígitos; ajuste se quiser letras também)
+        const { data } = await Tesseract.recognize(preview, 'por', {
+          logger: m => {
+            // m.progress vai de 0..1
+            if (m.status && typeof m.progress === 'number') {
+              rawEl.textContent = `OCR: ${m.status} (${Math.round(m.progress*100)}%)`;
+            }
+          },
+          tessedit_char_whitelist: '0123456789'
+        });
+
+        const text = (data.text || '').trim();
+        const onlyDigits = (text.match(/\d+/g) || []).join('');
+
+        rawEl.textContent = text || '(vazio)';
+        digitsEl.textContent = onlyDigits || '—';
+        const conf = (typeof data.confidence === 'number') ? Math.round(data.confidence) : null;
+        confEl.textContent = 'Confiança: ' + (conf !== null ? (conf + '%') : '—');
+
+        btnCopy.disabled = !onlyDigits;
+      } catch (e) {
+        digitsEl.textContent = '—';
+        rawEl.textContent = 'Erro: ' + e.message;
+      } finally {
+        btnSnap.disabled = false;
+        btnStart.disabled = !!stream; // se stream existe, start fica desabilitado
+      }
+    });
+  </script>
+</body>
+</html>
